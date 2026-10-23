@@ -10,7 +10,7 @@ import * as path from 'node:path';
 import {remark} from 'remark';
 import mdx from 'remark-mdx';
 import {read} from 'to-vfile';
-import plugin, {type PluginOptions} from '../index';
+import plugin, {AsyncQueue, type PluginOptions} from '../index';
 
 const siteDir = path.join(__dirname, '__fixtures__');
 
@@ -374,6 +374,29 @@ describe('transformImage plugin', () => {
           ]
         `);
       });
+    });
+  });
+
+  describe('AsyncQueue', () => {
+    it('limits concurrency to specified limit', async () => {
+      const queue = new AsyncQueue(3);
+      let running = 0;
+      let peak = 0;
+
+      const tasks = Array.from({length: 10}, async () => {
+        return queue.run(async () => {
+          running++;
+          peak = Math.max(peak, running);
+          await new Promise((resolve) => {
+            setTimeout(resolve, 10);
+          });
+          running--;
+        });
+      });
+
+      await Promise.all(tasks);
+      expect(peak).toBeLessThanOrEqual(3);
+      expect(running).toBe(0);
     });
   });
 });

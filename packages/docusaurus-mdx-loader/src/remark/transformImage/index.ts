@@ -33,6 +33,53 @@ import type {
   OnBrokenMarkdownImagesFunction,
 } from '@docusaurus/types';
 
+// Concurrency limiter for reading image files to avoid EMFILE errors (too many open files)
+// when processing many images concurrently on Windows (see https://github.com/facebook/docusaurus/issues/12756).
+export class AsyncQueue {
+  private running = 0;
+  private readonly queue: (() => void)[] = [];
+
+  constructor(private readonly limit: number) {}
+
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.running >= this.limit) {
+      await new Promise<void>((resolve) => {
+        this.queue.push(resolve);
+      });
+    }
+    this.running++;
+    try {
+      return await fn();
+    } finally {
+      this.running--;
+      const next = this.queue.shift();
+      if (next) {
+        next();
+      }
+    }
+  }
+}
+
+// 50 concurrent file handles prevents descriptor exhaustion on Windows while keeping throughput high
+const imageSizeQueue = new AsyncQueue(50);
+
+async function getImageSize(imagePath: string) {
+  return imageSizeQueue.run(async () => {
+    try {
+      return await imageSizeFromFile(imagePath);
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === 'EMFILE') {
+        // Wait briefly for active file descriptors to release before retrying once
+        await new Promise((resolve) => {
+          setTimeout(resolve, 50);
+        });
+        return await imageSizeFromFile(imagePath);
+      }
+      throw err;
+    }
+  });
+}
+
 export type PluginOptions = {
   staticDirs: string[];
   siteDir: string;
@@ -126,7 +173,7 @@ async function toImageRequireNode(
   }
 
   try {
-    const size = (await imageSizeFromFile(imagePath))!;
+    const size = (await getImageSize(imagePath))!;
     if (size.width) {
       attributes.push({
         type: 'mdxJsxAttribute',
